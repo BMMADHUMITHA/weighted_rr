@@ -1,0 +1,33 @@
+ncverilog grant.sv ngpc.sv weight_decoder.sv weighted_rr.sv weighted_rr_tb.sv +access+rw +gui +nccoverage+all
+
+imc
+
+genus -gui
+
+read_libs saed90nm_typ.lib
+
+read_hdl grant.sv ngpc.sv weight_decoder.sv weighted_rr.sv
+
+elaborate
+
+read_sdc constraints.sdc
+
+syn_generic
+
+syn_map
+
+syn_opt -incremental
+
+report_timing> wrr_timing.rpt
+
+report_area> wrr_area.rpt
+
+report_power> wrr_power.rpt
+
+write_hdl> wrr_netlist.v
+
+quit
+
+
+
+
