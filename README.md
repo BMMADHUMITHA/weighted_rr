@@ -52,9 +52,7 @@ The main machine behavior is implemented in three modified files:
 
 Supporting files provide the program entry point, menu/input handling, status display, and declarations.
 
-> **Simulation rule:** 1 real second represents 1 simulated minute.
-
----
+1 real second represents 1 simulated minute.
 
 ## Machine State Model
 
@@ -94,8 +92,6 @@ The code defines six states:
 
 `COMPLETED` and `ABORTED` are temporary states. The machine is immediately reset to `IDLE` after either condition.
 
----
-
 ## Initial Startup
 
 `machine_init()`:
@@ -129,8 +125,6 @@ flowchart TD
     E --> F[Display menu]
 ```
 
----
-
 ## Selecting a Wash Mode
 
 The user can select Heavy, Normal, or Light mode.
@@ -159,8 +153,6 @@ flowchart TD
     F -- Yes --> X
     F -- No --> G[Store selected mode]
 ```
-
----
 
 ## Starting a Wash Cycle
 
@@ -218,9 +210,7 @@ flowchart TD
     K --> L[Timer active]
 ```
 
-> **Important:** If Start is pressed while the door is OPEN, the code rejects the Start request. It does not create a pending detergent state.
-
----
+If Start is pressed while the door is OPEN, the code rejects the Start request. It does not create a pending detergent state.
 
 ## Door Behavior
 
@@ -273,8 +263,6 @@ flowchart TD
     I --> J[RUNNING]
 ```
 
----
-
 ## Detergent Behavior
 
 `machine_fill_detergent()` first checks:
@@ -312,8 +300,6 @@ flowchart TD
     H -- Yes --> J[Start wash]
     J --> K[RUNNING]
 ```
-
----
 
 ## Timer Thread
 
@@ -368,8 +354,6 @@ flowchart TD
     J --> B
 ```
 
----
-
 ## Wash Completion
 
 When the countdown reaches zero, `timer_tick()` first sets:
@@ -400,8 +384,6 @@ RUNNING → COMPLETED → IDLE
 ```
 
 The door is opened as part of the completion/reset process.
-
----
 
 ## Abort Behavior
 
@@ -443,8 +425,6 @@ flowchart TD
     E --> F[Reset machine]
     F --> G[IDLE]
 ```
-
----
 
 ## Power-Off / Power-Failure Handling
 
@@ -524,8 +504,6 @@ flowchart TD
     H -- No --> K[Preserve current state]
 ```
 
----
-
 ## Power Restoration
 
 When power is restored:
@@ -596,8 +574,6 @@ flowchart TD
     L --> M[Door OPEN]
 ```
 
----
-
 ## Complete Normal Wash Flow
 
 The direct successful path is:
@@ -629,8 +605,6 @@ flowchart TD
 
 The order of filling detergent and closing the door can vary, provided the final Start conditions are satisfied.
 
----
-
 ## Start-Pending Flow
 
 A pending Start request is created when:
@@ -660,7 +634,6 @@ flowchart TD
 
 If Start is pressed while the door is OPEN, `machine_start()` rejects the request immediately.
 
----
 
 ## Power Interruption During a Wash
 
@@ -685,7 +658,6 @@ flowchart TD
 
 This is the key recovery behavior implemented in `power.c`.
 
----
 
 ## High-Level State Transition Diagram
 
@@ -710,8 +682,6 @@ stateDiagram-v2
     COMPLETED --> IDLE: Immediate reset
     ABORTED --> IDLE: Immediate reset
 ```
-
----
 
 ## Concurrency and Mutex Protection
 
@@ -759,8 +729,6 @@ When the user exits:
 3. The timer thread exits.
 4. `machine_destroy()` destroys the mutex.
 
----
-
 ## File Responsibilities
 
 | File | Responsibility |
@@ -783,7 +751,6 @@ The three primary modified logic files are:
 2. `timer.c`
 3. `power.c`
 
----
 
 ## Behavior Summary
 
@@ -800,7 +767,6 @@ The three primary modified logic files are:
 | Power ON after interruption | Locked door + remaining time > 0 | Cycle resumes |
 | Timer reaches zero | Cycle is `RUNNING` | Cycle completes, door opens, and machine resets |
 
----
 
 ## Key Implementation Details
 
@@ -836,29 +802,6 @@ Changing the wash mode while `RUNNING` is rejected.
 
 Changing the wash mode while `WAITING_FOR_DETERGENT` with a pending Start request is rejected.
 
----
-
-## Recommended Flowcharts for Project Documentation
-
-The following diagrams provide a complete explanation of the modified functionality:
-
-1. **Normal Wash Flow**  
-   Shows mode selection, detergent, door closure, Start, timer countdown, completion, and reset.
-
-2. **Start-Pending Flow**  
-   Shows what happens when Start is pressed before detergent is filled.
-
-3. **Power Failure and Recovery**  
-   Shows preservation of remaining time and resumption after power restoration.
-
-4. **High-Level State Transition Diagram**  
-   Shows the overall machine state machine.
-
-5. **Concurrency Diagram**  
-   Shows the relationship between the main thread, timer thread, shared machine state, and mutex.
-
----
-
 ## Summary
 
 The washing machine simulator is implemented as a mutex-protected state machine.
@@ -869,41 +812,6 @@ The washing machine simulator is implemented as a mutex-protected state machine.
 - `main.c` connects the menu/input system to the machine operations.
 - A separate timer thread updates the wash cycle once every real second.
 
-The central behavior can be summarized as:
-
-```text
-IDLE
-  ↓
-Select Mode
-  ↓
-Prepare Door + Detergent
-  ↓
-Start
-  ↓
-RUNNING
-  ↓
-Timer Countdown
-  ↓
-COMPLETED
-  ↓
-IDLE
-```
-
-Power interruption provides an additional recovery path:
-
-```text
-RUNNING
-  ↓
-POWER_FAILURE
-  ↓
-Remaining Time Preserved
-  ↓
-Power Restored
-  ↓
-RUNNING
-  ↓
-Resume Countdown
-```
 
 
 
