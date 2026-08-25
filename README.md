@@ -42,34 +42,39 @@ Toe, Aung, "Design and Verification of a Round-Robin Arbiter" (2018). Thesis. Ro
 
 This project is a console-based washing machine simulator written in C using POSIX threads (`pthread`).
 
-The main machine behavior is implemented in three modified files:
+The main modified logic is contained in:
 
 | File | Responsibility |
 |---|---|
-| `machine.c` | Machine state, wash-mode selection, start/abort operations, door control, and detergent logic |
-| `timer.c` | Wash durations, countdown timer, timer thread, and cycle completion |
-| `power.c` | Power-off handling and recovery after power restoration |
+| `machine.c` | Machine state, mode selection, Start/Abort, door control, and detergent logic |
+| `timer.c` | Wash durations, countdown, timer thread, and completion |
+| `power.c` | Power-off handling and power restoration |
 
-Supporting files provide the program entry point, menu/input handling, status display, and declarations.
+Supporting files provide input handling, display, program entry, and declarations.
 
-1 real second represents 1 simulated minute.
+> **Simulation rule:** 1 real second represents 1 simulated minute.
 
-## Machine State Model
 
-The `WashingMachine` structure contains the following important variables:
+## 1. Machine State Model
 
-| Variable | Purpose |
+The machine uses these states:
+
+| State | Meaning |
 |---|---|
-| `mode` | Currently selected wash mode |
-| `state` | Current machine state |
-| `door_status` | Door condition: open, closed, or locked |
-| `remaining_time` | Remaining simulated wash time in minutes |
-| `detergent_present` | Indicates whether detergent has been filled |
-| `start_requested` | Indicates that Start was requested while detergent was missing |
-| `timer_running` | Indicates whether the countdown is active |
-| `power_present` | Indicates whether power is available |
-| `simulator_running` | Controls execution of the timer thread |
-| `mutex` | Protects shared machine state between threads |
+| `IDLE` | Machine is ready for a new cycle |
+| `WAITING_FOR_DETERGENT` | Start was requested, but detergent is missing |
+| `RUNNING` | Wash cycle is active |
+| `POWER_FAILURE` | Power has been switched off while the machine requires recovery |
+| `COMPLETED` | Temporary completion state before reset to `IDLE` |
+| `ABORTED` | Temporary abort state before reset to `IDLE` |
+
+The door has three possible conditions:
+
+| Door state | Meaning |
+|---|---|
+| `DOOR_OPEN` | Door is open |
+| `DOOR_CLOSED` | Door is closed but not locked |
+| `DOOR_LOCKED` | Door is locked during a running cycle or power-failure recovery |
 
 ### Wash Modes
 
@@ -79,108 +84,121 @@ The `WashingMachine` structure contains the following important variables:
 | Normal | 30 minutes |
 | Light | 20 minutes |
 
-### Machine States
 
-The code defines six states:
+## 2. Initial Startup
 
-- `IDLE`
-- `WAITING_FOR_DETERGENT`
-- `RUNNING`
-- `POWER_FAILURE`
-- `COMPLETED`
-- `ABORTED`
+`machine_init()` initializes the mutex, turns power ON, sets `simulator_running`, and resets the machine to `IDLE`.
 
-`COMPLETED` and `ABORTED` are temporary states. The machine is immediately reset to `IDLE` after either condition.
+```mermaid
+flowchart TD
+    A[Program starts] --> B[machine_init]
+    B --> C[Initialize mutex]
+    C --> D[power_present = 1]
+    D --> E[simulator_running = 1]
+    E --> F[reset_to_idle]
+    F --> G[State = IDLE]
+    G --> H[main creates timer thread]
+    H --> I[Main menu starts]
+```
 
-## Initial Startup
+Initial machine condition:
 
-`machine_init()`:
-
-1. Initializes the mutex.
-2. Turns power ON.
-3. Sets `simulator_running = 1`.
-4. Resets the machine to `IDLE`.
-
-Initial condition:
-
-| Property | Initial value |
+| Property | Value |
 |---|---|
 | Power | ON |
-| Mode | NONE |
-| State | IDLE |
+| Mode | `MODE_NONE` |
+| State | `IDLE` |
 | Door | OPEN |
 | Remaining time | 0 |
 | Detergent | EMPTY |
 | Start request | NONE |
 | Timer | STOPPED |
 
-The timer thread is then created by `main.c`.
+## 3. Selecting a Wash Mode
 
-```mermaid
-flowchart TD
-    A[Program starts] --> B[machine_init]
-    B --> C[Power ON]
-    C --> D[Reset machine to IDLE]
-    D --> E[Create timer thread]
-    E --> F[Display menu]
-```
+`machine_select_mode()` performs these checks in this order:
 
-## Selecting a Wash Mode
-
-The user can select Heavy, Normal, or Light mode.
-
-Before changing the mode, `machine_select_mode()` verifies:
-
-1. Power is ON.
-2. The machine is not in `POWER_FAILURE`.
-3. The selected mode is valid.
-4. The machine is not `RUNNING`.
-5. The machine is not waiting for detergent with a pending Start request.
+1. Power must be ON.
+2. State must not be `POWER_FAILURE`.
+3. The requested mode must be valid.
+4. The machine must not be `RUNNING`.
+5. The machine must not be `WAITING_FOR_DETERGENT`.
 
 If all checks pass, the selected mode is stored.
 
 ```mermaid
 flowchart TD
-    A[Select wash mode] --> B{Power ON?}
+    A[Select mode] --> B{Power ON?}
     B -- No --> X[Reject]
-    B -- Yes --> C{POWER_FAILURE?}
+    B -- Yes --> C{State = POWER_FAILURE?}
     C -- Yes --> X
     C -- No --> D{Valid mode?}
     D -- No --> X
-    D -- Yes --> E{RUNNING?}
+    D -- Yes --> E{State = RUNNING?}
     E -- Yes --> X
-    E -- No --> F{Start already pending?}
+    E -- No --> F{State = WAITING_FOR_DETERGENT?}
     F -- Yes --> X
     F -- No --> G[Store selected mode]
 ```
 
-## Starting a Wash Cycle
+## 4. Start Operation
 
-The Start operation is handled by:
+`machine_start()` first checks power and `POWER_FAILURE`, then calls `machine_start_locked()`.
 
-- `machine_start()`
-- `machine_start_locked()`
+`machine_start_locked()` performs the actual start checks.
 
-For a cycle to start immediately, the following conditions must be satisfied:
-
-- Power is ON.
-- A valid wash mode is selected.
-- The door is CLOSED.
-- Detergent is PRESENT.
-
-When the conditions are satisfied:
-
-```text
-remaining_time = selected mode duration
-door_status = DOOR_LOCKED
-state = RUNNING
-timer_running = 1
-start_requested = 0
+```mermaid
+flowchart TD
+    A[Press Start] --> B{Power ON?}
+    B -- No --> X[Reject]
+    B -- Yes --> C{State = POWER_FAILURE?}
+    C -- Yes --> X
+    C -- No --> D{State = RUNNING?}
+    D -- Yes --> Y[Ignore Start]
+    D -- No --> E{Valid mode?}
+    E -- No --> X
+    E -- Yes --> F{Door OPEN?}
+    F -- Yes --> X
+    F -- No --> G{Detergent present?}
+    G -- No --> H[start_requested = 1]
+    H --> I[State = WAITING_FOR_DETERGENT]
+    I --> J[timer_running = 0]
+    G -- Yes --> K[Load selected duration]
+    K --> L[Door = LOCKED]
+    L --> M[State = RUNNING]
+    M --> N[timer_running = 1]
 ```
 
-### Start Without Detergent
+### Important Start Detail
 
-If Start is pressed with the door closed but detergent is missing:
+The actual code does **not** require the door to be specifically `DOOR_CLOSED`. It only rejects `DOOR_OPEN`.
+
+Therefore:
+
+```text
+DOOR_CLOSED + detergent
+    → RUNNING
+
+DOOR_CLOSED + no detergent
+    → WAITING_FOR_DETERGENT
+
+DOOR_OPEN
+    → Start rejected
+```
+
+## 5. Start Pending for Detergent
+
+A pending Start request is created only when:
+
+```text
+Power = ON
+State = IDLE or WAITING_FOR_DETERGENT
+Valid mode selected
+Door != OPEN
+Detergent = EMPTY
+```
+
+The code then sets:
 
 ```text
 start_requested = 1
@@ -188,136 +206,155 @@ state = WAITING_FOR_DETERGENT
 timer_running = 0
 ```
 
-The timer does not start.
+The timer does not run.
 
-The cycle can begin later when detergent is filled.
+### Source-Accurate Pending Flow
 
 ```mermaid
 flowchart TD
-    A[Press Start] --> B{Power ON?}
-    B -- No --> X[Reject Start]
-    B -- Yes --> C{Valid mode selected?}
-    C -- No --> X
-    C -- Yes --> D{Door CLOSED?}
-    D -- No --> X
-    D -- Yes --> E{Detergent present?}
-    E -- No --> F[Set start_requested = 1]
-    F --> G[WAITING_FOR_DETERGENT]
-    G --> H[Timer stopped]
-    E -- Yes --> I[Load selected duration]
-    I --> J[Lock door]
-    J --> K[RUNNING]
-    K --> L[Timer active]
+    A[Start request] --> B{Door OPEN?}
+    B -- Yes --> X[Reject Start]
+    B -- No --> C{Detergent present?}
+    C -- Yes --> D[Start wash]
+    C -- No --> E[start_requested = 1]
+    E --> F[State = WAITING_FOR_DETERGENT]
+    F --> G[timer_running = 0]
 ```
 
-If Start is pressed while the door is OPEN, the code rejects the Start request. It does not create a pending detergent state.
-
-## Door Behavior
+## 6. Door Control
 
 ### Opening the Door
 
-`machine_open_door()` rejects the operation when:
+`machine_open_door()` rejects opening when:
 
-- Power is OFF.
-- The machine is in `POWER_FAILURE`.
-- The door is already locked.
+- Power is OFF
+- State is `POWER_FAILURE`
+- Door is already locked
+- Door is already open
 
-If the door is closed and opening is allowed:
+Otherwise the door becomes `DOOR_OPEN`.
 
-```text
-door_status = DOOR_OPEN
+The source contains a commented-out special restriction for `WAITING_FOR_DETERGENT`; because it is commented out, that restriction is **not active**.
+
+```mermaid
+flowchart TD
+    A[Open door] --> B{Power ON?}
+    B -- No --> X[Reject]
+    B -- Yes --> C{State = POWER_FAILURE?}
+    C -- Yes --> X
+    C -- No --> D{Door LOCKED?}
+    D -- Yes --> X
+    D -- No --> E{Door already OPEN?}
+    E -- Yes --> X
+    E -- No --> F[Door = OPEN]
 ```
-
-A locked door cannot be opened during a running wash.
 
 ### Closing the Door
 
-`machine_close_door()` rejects the operation when:
+`machine_close_door()` rejects closing when:
 
-- Power is OFF.
-- The machine is in `POWER_FAILURE`.
-- The door is already closed.
-- The door is already locked.
+- Power is OFF
+- State is `POWER_FAILURE`
+- Door is already locked
+- Door is already closed
 
-Otherwise:
+Otherwise the door becomes `DOOR_CLOSED`.
 
-```text
-door_status = DOOR_CLOSED
-```
-
-If a Start request is pending and detergent is already present, closing the door automatically starts the wash.
+There is then an automatic-start check.
 
 ```mermaid
 flowchart TD
     A[Close door] --> B{Power ON?}
     B -- No --> X[Reject]
-    B -- Yes --> C{POWER_FAILURE?}
+    B -- Yes --> C{State = POWER_FAILURE?}
     C -- Yes --> X
-    C -- No --> D{Door already closed?}
+    C -- No --> D{Door LOCKED?}
     D -- Yes --> X
-    D -- No --> E[Door becomes CLOSED]
-    E --> F{Start pending and detergent present?}
-    F -- No --> G[Remain in current state]
-    F -- Yes --> H[Start wash]
-    H --> I[Door LOCKED]
+    D -- No --> E{Door already CLOSED?}
+    E -- Yes --> X
+    E -- No --> F[Door = CLOSED]
+    F --> G{Waiting + Start pending + Detergent present + Power ON?}
+    G -- No --> H[Remain in current state]
+    G -- Yes --> I[machine_start_locked]
     I --> J[RUNNING]
 ```
 
-## Detergent Behavior
+## 7. Detergent Operation
 
-`machine_fill_detergent()` first checks:
+`machine_fill_detergent()` checks:
 
-- Power is ON.
-- The machine is not in `POWER_FAILURE`.
-- Detergent has not already been filled.
+1. Power is ON.
+2. State is not `POWER_FAILURE`.
+3. Detergent is not already present.
 
-When successful:
+Then:
 
 ```text
 detergent_present = 1
 ```
 
-### If Start Is Already Pending
-
-If the machine is in `WAITING_FOR_DETERGENT`:
-
-- If the door is OPEN, the machine waits for the user to close it.
-- If the door is CLOSED, the wash starts immediately.
+If a Start request is pending, the result depends on the door.
 
 ```mermaid
 flowchart TD
     A[Fill detergent] --> B{Power ON?}
     B -- No --> X[Reject]
-    B -- Yes --> C{POWER_FAILURE?}
+    B -- Yes --> C{State = POWER_FAILURE?}
     C -- Yes --> X
-    C -- No --> D{Already filled?}
+    C -- No --> D{Detergent already present?}
     D -- Yes --> X
     D -- No --> E[detergent_present = 1]
-    E --> F{Start pending?}
-    F -- No --> G[Remain in current state]
-    F -- Yes --> H{Door CLOSED?}
-    H -- No --> I[Wait for door to close]
-    H -- Yes --> J[Start wash]
-    J --> K[RUNNING]
+    E --> F{State = WAITING_FOR_DETERGENT and Start pending?}
+    F -- No --> G[Finish detergent operation]
+    F -- Yes --> H{Door OPEN?}
+    H -- Yes --> I[Wait for door to close]
+    H -- No --> J{Door CLOSED and Power ON?}
+    J -- Yes --> K[machine_start_locked]
+    K --> L[RUNNING]
+    J -- No --> G
 ```
 
-## Timer Thread
+### Pending Start Sequence
 
-The timer is implemented using a separate pthread.
+The intended successful pending sequence is:
 
-`timer_thread()` repeatedly:
-
-1. Sleeps for one real second.
-2. Checks `simulator_running`.
-3. Calls `timer_tick()`.
-
-Therefore:
-
-```text
-1 real second = 1 simulated minute
+```mermaid
+flowchart TD
+    A[Door CLOSED] --> B[Press Start]
+    B --> C[No detergent]
+    C --> D[WAITING_FOR_DETERGENT]
+    D --> E[Fill detergent]
+    E --> F[Start immediately]
+    F --> G[Door LOCKED]
+    G --> H[RUNNING]
 ```
 
-`timer_tick()` only decrements the timer when all three conditions are true:
+If the door is OPEN when detergent is filled, the machine remains in `WAITING_FOR_DETERGENT` and waits for the user to close the door.
+
+## 8. Timer Thread
+
+`timer_thread()` runs continuously until `simulator_running` becomes false.
+
+Every loop:
+
+1. Sleep for 1 second.
+2. Read `simulator_running`.
+3. Exit if it is false.
+4. Otherwise call `timer_tick()`.
+
+```mermaid
+flowchart TD
+    A[Timer thread starts] --> B[Sleep 1 second]
+    B --> C[Read simulator_running]
+    C --> D{Simulator running?}
+    D -- No --> E[Exit timer thread]
+    D -- Yes --> F[Call timer_tick]
+    F --> B
+```
+
+### Timer Tick
+
+`timer_tick()` only performs a countdown when:
 
 ```text
 state == RUNNING
@@ -325,38 +362,28 @@ timer_running == 1
 power_present == 1
 ```
 
-Otherwise, the timer tick is ignored.
-
-### Countdown
-
-For every valid timer tick:
-
-```text
-remaining_time--
-```
-
-When `remaining_time` reaches zero, the wash cycle completes.
+Otherwise, it returns without changing the remaining time.
 
 ```mermaid
 flowchart TD
-    A[Timer thread] --> B[Sleep 1 second]
-    B --> C{Simulator running?}
-    C -- No --> Z[Exit timer thread]
-    C -- Yes --> D[timer_tick]
-    D --> E{RUNNING + timer active + power ON?}
-    E -- No --> B
-    E -- Yes --> F[Decrement remaining_time]
-    F --> G{remaining_time = 0?}
-    G -- No --> B
-    G -- Yes --> H[Complete cycle]
-    H --> I[Door OPEN]
-    I --> J[Reset to IDLE]
-    J --> B
+    A[timer_tick] --> B{State = RUNNING?}
+    B -- No --> X[Return]
+    B -- Yes --> C{timer_running = 1?}
+    C -- No --> X
+    C -- Yes --> D{Power ON?}
+    D -- No --> X
+    D -- Yes --> E{remaining_time > 0?}
+    E -- Yes --> F[remaining_time--]
+    E -- No --> G[remaining_time already 0]
+    F --> H{remaining_time = 0?}
+    H -- No --> I[Return]
+    H -- Yes --> J[Complete cycle]
+    G --> J
 ```
 
-## Wash Completion
+## 9. Wash Completion
 
-When the countdown reaches zero, `timer_tick()` first sets:
+When the remaining time reaches zero, `timer_tick()` first sets:
 
 ```text
 state = COMPLETED
@@ -365,35 +392,38 @@ timer_running = 0
 start_requested = 0
 ```
 
-The machine then immediately resets to `IDLE`:
+Then it resets the machine to `IDLE`.
 
-```text
-mode = MODE_NONE
-state = IDLE
-door_status = DOOR_OPEN
-remaining_time = 0
-detergent_present = 0
-start_requested = 0
-timer_running = 0
+```mermaid
+flowchart TD
+    A[remaining_time reaches 0] --> B[State = COMPLETED]
+    B --> C[Door = OPEN]
+    C --> D[timer_running = 0]
+    D --> E[start_requested = 0]
+    E --> F[reset machine fields]
+    F --> G[State = IDLE]
+    G --> H[Mode = NONE]
+    H --> I[Remaining time = 0]
+    I --> J[Detergent = EMPTY]
 ```
 
-The effective transition is:
+Therefore the observable sequence is:
 
 ```text
 RUNNING → COMPLETED → IDLE
 ```
 
-The door is opened as part of the completion/reset process.
+`COMPLETED` is very short-lived because `timer_tick()` immediately resets the machine.
 
-## Abort Behavior
+## 10. Abort
 
-`machine_abort()` only performs an abort when:
+`machine_abort()` only acts when:
 
 ```text
 state == RUNNING
 ```
 
-When a running cycle is aborted:
+If the cycle is active:
 
 ```text
 state = ABORTED
@@ -402,315 +432,215 @@ timer_running = 0
 start_requested = 0
 ```
 
-The machine then calls `reset_to_idle()`.
-
-Final state:
-
-| Property | Value after abort |
-|---|---|
-| Mode | NONE |
-| State | IDLE |
-| Door | OPEN |
-| Remaining time | 0 |
-| Detergent | EMPTY |
-| Start request | NONE |
-| Timer | STOPPED |
+Then `reset_to_idle()` is called.
 
 ```mermaid
 flowchart TD
-    A[RUNNING] --> B[Press Abort]
-    B --> C[State = ABORTED]
-    C --> D[Stop timer]
-    D --> E[Door OPEN]
-    E --> F[Reset machine]
-    F --> G[IDLE]
+    A[Press Abort] --> B{State = RUNNING?}
+    B -- No --> X[Abort ignored]
+    B -- Yes --> C[State = ABORTED]
+    C --> D[Door = OPEN]
+    D --> E[timer_running = 0]
+    E --> F[start_requested = 0]
+    F --> G[reset_to_idle]
+    G --> H[State = IDLE]
 ```
 
-## Power-Off / Power-Failure Handling
+`ABORTED` is therefore also a temporary state.
 
-Power behavior is implemented in `power.c`.
+## 11. Power Failure
 
-When power is switched OFF:
+`power_failure()` first verifies that power is currently ON.
+
+It then sets:
 
 ```text
 power_present = 0
 ```
 
-### Power Failure During RUNNING
-
-If the machine is running:
-
-```text
-timer_running = 0
-state = POWER_FAILURE
-door_status = DOOR_LOCKED
-remaining_time = unchanged
-```
-
-The remaining wash time is preserved.
-
-For example:
-
-```text
-Normal cycle
-      ↓
-30 minutes
-      ↓
-8 timer ticks
-      ↓
-22 minutes remaining
-      ↓
-Power OFF
-      ↓
-POWER_FAILURE
-      ↓
-22 minutes preserved
-```
-
-The door remains locked until power is restored.
-
-### Power Failure While Waiting for Detergent
-
-If the machine is:
-
-```text
-WAITING_FOR_DETERGENT
-```
-
-power failure changes the state to:
-
-```text
-POWER_FAILURE
-door_status = DOOR_LOCKED
-```
-
-The pending Start request remains stored.
-
-### Power Off in Other States
-
-For states other than `RUNNING` and `WAITING_FOR_DETERGENT`, the code turns power off while preserving the current machine state.
+The subsequent behavior depends on the current state.
 
 ```mermaid
 flowchart TD
-    A[Power OFF] --> B[power_present = 0]
-    B --> C{State RUNNING?}
-    C -- Yes --> D[Stop timer]
-    D --> E[State = POWER_FAILURE]
-    E --> F[Door LOCKED]
-    F --> G[Preserve remaining time]
-    C -- No --> H{WAITING_FOR_DETERGENT?}
-    H -- Yes --> I[State = POWER_FAILURE]
-    I --> J[Door LOCKED]
-    H -- No --> K[Preserve current state]
+    A[Power OFF requested] --> B{Power already OFF?}
+    B -- Yes --> X[Reject]
+    B -- No --> C[power_present = 0]
+    C --> D{State = RUNNING?}
+    D -- Yes --> E[timer_running = 0]
+    E --> F[State = POWER_FAILURE]
+    F --> G[Door = LOCKED]
+    G --> H[Remaining time preserved]
+    D -- No --> I{State = WAITING_FOR_DETERGENT?}
+    I -- Yes --> J[State = POWER_FAILURE]
+    J --> K[Door = LOCKED]
+    I -- No --> L[Preserve current state]
 ```
 
-## Power Restoration
+### Important Power-Failure Detail
 
-When power is restored:
+If the machine is `RUNNING`, the remaining time is **not modified**.
+
+Example:
+
+```text
+Normal cycle = 30 minutes
+Remaining time = 22 minutes
+Power OFF
+Remaining time = 22 minutes
+```
+
+## 12. Power Restoration
+
+`power_restore()` first verifies that power is currently OFF, then sets:
 
 ```text
 power_present = 1
 ```
 
-If the machine was in `POWER_FAILURE`, `power_restore()` determines the recovery path.
+Only if the previous state is `POWER_FAILURE` does it perform recovery logic.
 
-### Interrupted Running Cycle
-
-If:
-
-```text
-door_status == DOOR_LOCKED
-remaining_time > 0
+```mermaid
+flowchart TD
+    A[Power ON requested] --> B{Power already ON?}
+    B -- Yes --> X[Reject]
+    B -- No --> C[power_present = 1]
+    C --> D{State = POWER_FAILURE?}
+    D -- No --> E[Keep current state]
+    D -- Yes --> F{Door LOCKED and remaining_time > 0?}
+    F -- Yes --> G[timer_running = 1]
+    G --> H[State = RUNNING]
+    H --> I[Resume unfinished wash]
+    F -- No --> J{Door LOCKED and remaining_time = 0 and Start pending?}
+    J -- Yes --> K[timer_running = 0]
+    K --> L[State = WAITING_FOR_DETERGENT]
+    J -- No --> M[State = IDLE]
+    M --> N[Door = OPEN]
 ```
 
-then:
+### Recovery of an Interrupted Wash
 
-```text
-timer_running = 1
-state = RUNNING
+The normal recovery path is:
+
+```mermaid
+flowchart LR
+    A[RUNNING] --> B[Power OFF]
+    B --> C[POWER_FAILURE]
+    C --> D[Timer stopped]
+    D --> E[Remaining time preserved]
+    E --> F[Door LOCKED]
+    F --> G[Power ON]
+    G --> H[Remaining time > 0]
+    H --> I[Timer restarted]
+    I --> J[RUNNING]
 ```
 
-The wash resumes from the preserved remaining time.
+The wash therefore resumes from the preserved remaining time.
 
-### Pending Start / Detergent Case
+### Important Edge Case in the Source
 
-If:
+There is a specific recovery branch for:
 
 ```text
-door_status == DOOR_LOCKED
-remaining_time == 0
-start_requested == 1
+Door = LOCKED
+remaining_time = 0
+start_requested = 1
 ```
 
-then:
+In that case power restoration sets:
 
 ```text
 state = WAITING_FOR_DETERGENT
 timer_running = 0
 ```
 
-### Other Recovery Cases
+The source itself does not reset the door to OPEN in this branch.
 
-The machine is reset to:
+## 13. Overall State Flow
 
-```text
-state = IDLE
-door_status = DOOR_OPEN
-```
-
-```mermaid
-flowchart TD
-    A[Power ON] --> B[power_present = 1]
-    B --> C{State = POWER_FAILURE?}
-    C -- No --> D[Keep current state]
-    C -- Yes --> E{Door LOCKED and remaining_time > 0?}
-    E -- Yes --> F[Timer ON]
-    F --> G[State = RUNNING]
-    G --> H[Resume unfinished wash]
-    E -- No --> I{Door LOCKED + remaining_time = 0 + Start pending?}
-    I -- Yes --> J[State = WAITING_FOR_DETERGENT]
-    J --> K[Timer OFF]
-    I -- No --> L[State = IDLE]
-    L --> M[Door OPEN]
-```
-
-## Complete Normal Wash Flow
-
-The direct successful path is:
-
-```mermaid
-flowchart TD
-    A[IDLE] --> B[Select wash mode]
-    B --> C[Fill detergent]
-    C --> D[Close door]
-    D --> E[Press Start]
-    E --> F{Power ON?}
-    F -- No --> X[Reject Start]
-    F -- Yes --> G{Valid mode?}
-    G -- No --> X
-    G -- Yes --> H{Door CLOSED?}
-    H -- No --> X
-    H -- Yes --> I{Detergent present?}
-    I -- No --> J[WAITING_FOR_DETERGENT]
-    I -- Yes --> K[Load selected duration]
-    K --> L[Lock door]
-    L --> M[RUNNING]
-    M --> N[Timer ticks every second]
-    N --> O{Time remaining = 0?}
-    O -- No --> N
-    O -- Yes --> P[COMPLETED]
-    P --> Q[Door OPEN]
-    Q --> R[Reset to IDLE]
-```
-
-The order of filling detergent and closing the door can vary, provided the final Start conditions are satisfied.
-
-## Start-Pending Flow
-
-A pending Start request is created when:
-
-- A valid mode is selected.
-- The door is CLOSED.
-- Start is pressed.
-- Detergent is missing.
-
-```mermaid
-flowchart TD
-    A[IDLE] --> B[Select wash mode]
-    B --> C[Close door]
-    C --> D[Press Start]
-    D --> E{Detergent present?}
-    E -- No --> F[Set start_requested = 1]
-    F --> G[WAITING_FOR_DETERGENT]
-    G --> H[Fill detergent]
-    H --> I{Door CLOSED?}
-    I -- Yes --> J[Start immediately]
-    J --> K[Lock door]
-    K --> L[RUNNING]
-    I -- No --> M[Wait for door to close]
-    M --> N[Close door]
-    N --> J
-```
-
-If Start is pressed while the door is OPEN, `machine_start()` rejects the request immediately.
-
-
-## Power Interruption During a Wash
-
-The main recovery sequence is:
-
-```mermaid
-flowchart TD
-    A[RUNNING] --> B[Power OFF]
-    B --> C[power_present = 0]
-    C --> D[Stop timer]
-    D --> E[State = POWER_FAILURE]
-    E --> F[Door remains LOCKED]
-    F --> G[Remaining time preserved]
-    G --> H[Power ON]
-    H --> I[Restore power]
-    I --> J{Door LOCKED and remaining_time > 0?}
-    J -- Yes --> K[State = RUNNING]
-    K --> L[Timer resumes]
-    L --> M[Continue from preserved time]
-    J -- No --> N[Use other recovery path]
-```
-
-This is the key recovery behavior implemented in `power.c`.
-
-
-## High-Level State Transition Diagram
+The following diagram represents the **actual state-changing paths present in the supplied code**. Powering OFF while in `IDLE` does **not** change the machine state to `POWER_FAILURE`; the source preserves the current state.
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
 
-    IDLE --> WAITING_FOR_DETERGENT: Start with closed door and no detergent
-    IDLE --> RUNNING: Start with valid mode + closed door + detergent
+    IDLE --> WAITING_FOR_DETERGENT: Start with no detergent and door not open
+    IDLE --> RUNNING: Start with valid mode, non-open door, detergent present
 
     WAITING_FOR_DETERGENT --> RUNNING: Detergent filled with door closed
+    WAITING_FOR_DETERGENT --> RUNNING: Door closed with detergent present
     WAITING_FOR_DETERGENT --> POWER_FAILURE: Power OFF
 
-    RUNNING --> COMPLETED: Timer reaches 0
+    RUNNING --> COMPLETED: Timer reaches zero
     RUNNING --> ABORTED: Abort
     RUNNING --> POWER_FAILURE: Power OFF
 
-    POWER_FAILURE --> RUNNING: Power restored and remaining_time > 0
-    POWER_FAILURE --> WAITING_FOR_DETERGENT: Power restored with pending Start
-    POWER_FAILURE --> IDLE: Other recovery case
-
     COMPLETED --> IDLE: Immediate reset
     ABORTED --> IDLE: Immediate reset
+
+    POWER_FAILURE --> RUNNING: Power restored with locked door and remaining time > 0
+    POWER_FAILURE --> WAITING_FOR_DETERGENT: Power restored with locked door, time = 0, Start pending
+    POWER_FAILURE --> IDLE: Other power-restoration case
 ```
 
-## Concurrency and Mutex Protection
+## 14. Normal Successful Wash
 
-The simulator has two active execution paths.
+A direct successful cycle can be represented as:
 
-### Main Thread
+```mermaid
+flowchart TD
+    A[IDLE] --> B[Select Heavy / Normal / Light]
+    B --> C[Close door]
+    C --> D[Fill detergent]
+    D --> E[Press Start]
+    E --> F[Load mode duration]
+    F --> G[Lock door]
+    G --> H[RUNNING]
+    H --> I[Timer thread sleeps 1 second]
+    I --> J[Timer tick]
+    J --> K[Decrement remaining time]
+    K --> L{Remaining time = 0?}
+    L -- No --> I
+    L -- Yes --> M[COMPLETED]
+    M --> N[Door OPEN]
+    N --> O[Reset to IDLE]
+```
 
-The main thread:
+The order of **Fill Detergent** and **Close Door** may be reversed.
 
-- Reads user input.
-- Selects modes.
-- Starts or aborts cycles.
-- Controls the door.
-- Fills detergent.
-- Controls power.
-- Displays status.
+The critical condition at Start is that the door must not be `DOOR_OPEN`.
 
-### Timer Thread
+## 15. Power Interruption During a Wash
 
-The timer thread:
+```mermaid
+flowchart TD
+    A[RUNNING] --> B[Power OFF]
+    B --> C[power_present = 0]
+    C --> D[POWER_FAILURE]
+    D --> E[Door LOCKED]
+    E --> F[Timer stopped]
+    F --> G[Remaining time preserved]
+    G --> H[Power ON]
+    H --> I{Remaining time > 0?}
+    I -- Yes --> J[Timer restarted]
+    J --> K[RUNNING]
+    K --> L[Continue countdown]
+    I -- No --> M{Start pending?}
+    M -- Yes --> N[WAITING_FOR_DETERGENT]
+    M -- No --> O[IDLE + Door OPEN]
+```
 
-- Sleeps for one real second.
-- Checks whether the simulator is still running.
-- Calls `timer_tick()`.
-- Updates the remaining wash time.
+## 16. Concurrency
 
-Both threads access the same `WashingMachine` structure.
+The simulator has two main execution paths.
 
-A mutex protects shared state:
+| Execution path | Responsibility |
+|---|---|
+| Main thread | Reads menu input and performs machine operations |
+| Timer thread | Sleeps for one second and calls `timer_tick()` |
+
+Both access the shared `WashingMachine` structure.
+
+The mutex protects shared state:
 
 ```c
 pthread_mutex_lock(&machine->mutex);
@@ -720,98 +650,85 @@ pthread_mutex_lock(&machine->mutex);
 pthread_mutex_unlock(&machine->mutex);
 ```
 
-### Shutdown
+The shutdown sequence is:
 
-When the user exits:
+```mermaid
+flowchart TD
+    A[User selects Exit] --> B[machine_shutdown]
+    B --> C[simulator_running = 0]
+    C --> D[pthread_join timer thread]
+    D --> E[Timer thread exits]
+    E --> F[machine_destroy]
+    F --> G[Mutex destroyed]
+    G --> H[Program exits]
+```
 
-1. `machine_shutdown()` sets `simulator_running = 0`.
-2. `main.c` waits for the timer thread using `pthread_join()`.
-3. The timer thread exits.
-4. `machine_destroy()` destroys the mutex.
-
-## File Responsibilities
+## 17. File Responsibilities
 
 | File | Responsibility |
 |---|---|
-| `machine.c` | Core washing-machine state machine, mode selection, start/abort, door, and detergent logic |
+| `machine.c` | Core state machine, mode selection, Start/Abort, door, and detergent operations |
 | `timer.c` | Mode durations, countdown, timer thread, and completion |
-| `power.c` | Power-off behavior and power restoration |
-| `machine.h` | Machine state/data definitions and function declarations |
+| `power.c` | Power failure and power restoration |
+| `machine.h` | Machine data structures, states, and declarations |
 | `timer.h` | Timer declarations |
-| `power.h` | Power function declarations |
-| `main.c` | Program entry point, timer-thread creation, menu dispatch, and shutdown |
-| `input.c` / `input.h` | Converts menu choices into `UserInput` values |
-| `display.c` / `display.h` | Displays current machine status |
+| `power.h` | Power declarations |
+| `main.c` | Program entry, timer-thread creation, input dispatch, and shutdown |
+| `input.c` / `input.h` | User menu input |
+| `display.c` / `display.h` | Machine status display |
 
 ### Primary Modified Files
 
-The three primary modified logic files are:
+The primary modified files are:
 
 1. `machine.c`
 2. `timer.c`
 3. `power.c`
 
+## 18. Source-Verified Behavior Summary
 
-## Behavior Summary
+| Operation | Actual source behavior |
+|---|---|
+| Select mode | Allowed only when powered ON, valid mode, and not `RUNNING` or `WAITING_FOR_DETERGENT` |
+| Start with door OPEN | Rejected |
+| Start with door CLOSED and no detergent | Sets `WAITING_FOR_DETERGENT` and `start_requested` |
+| Start with detergent | Loads selected duration, locks door, enters `RUNNING` |
+| Fill detergent while waiting and door CLOSED | Starts cycle immediately |
+| Fill detergent while waiting and door OPEN | Stays waiting until door is closed |
+| Close door while waiting, detergent present | Starts cycle immediately |
+| Open locked door | Rejected |
+| Abort while running | Sets `ABORTED`, opens door, then resets to `IDLE` |
+| Timer reaches zero | Sets `COMPLETED`, opens door, then resets to `IDLE` |
+| Power OFF while running | Stops timer, enters `POWER_FAILURE`, locks door, preserves remaining time |
+| Power OFF while waiting | Enters `POWER_FAILURE` and locks door |
+| Power OFF while idle | Power turns OFF but state remains unchanged |
+| Restore power after interrupted running cycle | Resumes `RUNNING` if door is locked and remaining time > 0 |
+| Restore power with locked door, zero time, and pending Start | Returns to `WAITING_FOR_DETERGENT` |
+| Other power restoration case | Resets to `IDLE` with door OPEN |
 
-| Operation | Required condition | Result |
-|---|---|---|
-| Select mode | Power ON, not running, no pending Start | Selected mode is stored |
-| Start | Valid mode + closed door + detergent + power | Cycle starts and door locks |
-| Start without detergent | Valid mode + closed door + no detergent | `WAITING_FOR_DETERGENT` |
-| Fill detergent | Power ON and not in power failure | Detergent becomes present |
-| Close door | Door is open and power is available | Door becomes closed; a pending cycle may start |
-| Open door | Door is not locked and power is available | Door becomes open |
-| Abort | Cycle is `RUNNING` | Cycle stops and machine resets to `IDLE` |
-| Power OFF during run | Cycle is `RUNNING` | Timer stops and remaining time is preserved |
-| Power ON after interruption | Locked door + remaining time > 0 | Cycle resumes |
-| Timer reaches zero | Cycle is `RUNNING` | Cycle completes, door opens, and machine resets |
+## 19. Important Source-Level Notes
 
+### `COMPLETED` and `ABORTED` are temporary
 
-## Key Implementation Details
+Both states are assigned in the code, but both are immediately followed by a reset to `IDLE`. They are therefore best represented as **transitional states**, not stable operating states.
 
-### Door After Completion
+### Power OFF does not always mean `POWER_FAILURE`
 
-The supplied code changes the door status to `DOOR_OPEN` when the wash completes.
+`power_failure()` only assigns `POWER_FAILURE` when the current state is:
 
-### Door After Abort
+- `RUNNING`, or
+- `WAITING_FOR_DETERGENT`
 
-The supplied code changes the door status to `DOOR_OPEN` when the cycle is aborted.
+If the machine is in another state, the code simply turns power OFF and preserves the current state.
 
-### Remaining Time During Power Failure
+### The timer thread does not stop when power is OFF
 
-When power fails during `RUNNING`, the remaining time is preserved.
+The thread itself continues sleeping and checking `simulator_running`. `timer_tick()` simply returns without decrementing while power is unavailable or the machine is not running.
 
-### Timer During Power Failure
-
-The timer is stopped during power failure and resumes only after the appropriate power-restoration path.
-
-### Detergent Reset
-
-After completion or abort, `detergent_present` is reset to `0`, so detergent must be filled again for the next cycle.
-
-### Start During a Running Cycle
-
-Pressing Start while `RUNNING` is ignored.
-
-### Mode Change During a Running Cycle
-
-Changing the wash mode while `RUNNING` is rejected.
-
-### Mode Change While Start Is Pending
-
-Changing the wash mode while `WAITING_FOR_DETERGENT` with a pending Start request is rejected.
 
 ## Summary
 
-The washing machine simulator is implemented as a mutex-protected state machine.
-
-- `machine.c` controls the machine's operating conditions and user actions.
-- `timer.c` controls simulated wash time, countdown, and completion.
-- `power.c` handles power failure and recovery.
-- `main.c` connects the menu/input system to the machine operations.
-- A separate timer thread updates the wash cycle once every real second.
-
+The simulator is a mutex-protected state machine driven by user operations in the main thread and a one-second timer thread.
 
 
 
