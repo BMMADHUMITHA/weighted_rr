@@ -40,7 +40,7 @@ Toe, Aung, "Design and Verification of a Round-Robin Arbiter" (2018). Thesis. Ro
 
 ## Overview
 
-This project is a console-based washing machine simulator written in C using POSIX threads (`pthread`).
+This project is a console-based washing machine simulator written in C using.
 
 The main modified logic is contained in:
 
@@ -87,12 +87,12 @@ The door has three possible conditions:
 
 ## 2. Initial Startup
 
-`machine_init()` initializes the mutex, turns power ON, sets `simulator_running`, and resets the machine to `IDLE`.
+`machine_init()` initializes, turns power ON, sets `simulator_running`, and resets the machine to `IDLE`.
 
 ```mermaid
 flowchart TD
     A[Program starts] --> B[machine_init]
-    B --> C[Initialize mutex]
+    B --> C[Initialize]
     C --> D[power_present = 1]
     D --> E[simulator_running = 1]
     E --> F[reset_to_idle]
@@ -640,16 +640,6 @@ The simulator has two main execution paths.
 
 Both access the shared `WashingMachine` structure.
 
-The mutex protects shared state:
-
-```c
-pthread_mutex_lock(&machine->mutex);
-
-/* Access or modify shared machine state */
-
-pthread_mutex_unlock(&machine->mutex);
-```
-
 The shutdown sequence is:
 
 ```mermaid
@@ -659,7 +649,7 @@ flowchart TD
     C --> D[pthread_join timer thread]
     D --> E[Timer thread exits]
     E --> F[machine_destroy]
-    F --> G[Mutex destroyed]
+    F --> G[destroyed]
     G --> H[Program exits]
 ```
 
@@ -728,8 +718,7 @@ The thread itself continues sleeping and checking `simulator_running`. `timer_ti
 
 ## Summary
 
-The simulator is a mutex-protected state machine driven by user operations in the main thread and a one-second timer thread.
-
+The simulator is a state machine driven by user operations in the main thread and a one-second timer thread.
 
 
 
